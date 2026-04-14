@@ -1,0 +1,12 @@
+{
+  "images" : [
+    {
+      "filename" : "ParkedLogo.png",
+      "idiom" : "universal"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}

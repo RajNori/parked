@@ -2,85 +2,111 @@
 //  ContentView.swift
 //  parked
 //
-//  Created by Raj on 14/4/2026.
-//
 
+import SwiftData
 import SwiftUI
-import CoreData
 
 struct ContentView: View {
-    @Environment(\.managedObjectContext) private var viewContext
+    @Environment(\.modelContext) private var modelContext
+    @AppStorage(AppSettings.hasCompletedOnboardingKey) private var hasCompletedOnboarding = false
 
-    @FetchRequest(
-        sortDescriptors: [NSSortDescriptor(keyPath: \Item.timestamp, ascending: true)],
-        animation: .default)
-    private var items: FetchedResults<Item>
+    @State private var appState: AppState?
+    @State private var meterExpiredBanner: MeterExpiredBannerPayload?
+
+    private var shouldPresentOnboarding: Bool {
+        !hasCompletedOnboarding && appState != nil
+    }
 
     var body: some View {
-        NavigationView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp!, formatter: itemFormatter)")
-                    } label: {
-                        Text(item.timestamp!, formatter: itemFormatter)
+        ZStack {
+            if let appState {
+                HomeView()
+                    .environment(\.parkedAppState, appState)
+            } else {
+                ProgressView(String(localized: "Loading…", comment: "Initial app load"))
+            }
+        }
+        .animation(.default, value: appState != nil)
+        .overlay(alignment: .top) {
+            if let payload = meterExpiredBanner {
+                MeterExpiredBannerView(
+                    payload: payload,
+                    onDismiss: {
+                        meterExpiredBanner = nil
+                    },
+                    onGetDirections: {
+                        MeterExpiredBannerView.openWalkingDirections(payload: payload)
+                        meterExpiredBanner = nil
+                    }
+                )
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .task(id: payload.spotId) {
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    if meterExpiredBanner?.spotId == payload.spotId {
+                        meterExpiredBanner = nil
                     }
                 }
-                .onDelete(perform: deleteItems)
             }
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    EditButton()
-                }
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
-                    }
-                }
+        }
+        .animation(.spring(response: 0.38, dampingFraction: 0.86), value: meterExpiredBanner?.spotId)
+        .onReceive(NotificationCenter.default.publisher(for: .parkedMeterExpired)) { note in
+            guard let info = note.userInfo,
+                  let spotId = info[ParkedMeterExpiredUserInfoKey.spotId] as? String,
+                  let lat = double(from: info, key: ParkedMeterExpiredUserInfoKey.latitude),
+                  let lng = double(from: info, key: ParkedMeterExpiredUserInfoKey.longitude),
+                  let address = info[ParkedMeterExpiredUserInfoKey.address] as? String else { return }
+            Task { @MainActor in
+                meterExpiredBanner = MeterExpiredBannerPayload(
+                    spotId: spotId,
+                    latitude: lat,
+                    longitude: lng,
+                    address: address
+                )
             }
-            Text("Select an item")
+        }
+        .task {
+            if appState == nil {
+                appState = AppState(modelContext: modelContext)
+            }
+        }
+        .fullScreenCover(isPresented: Binding(get: { shouldPresentOnboarding }, set: { _ in })) {
+            if let appState {
+                OnboardingView(locationManager: appState.locationManager)
+                    .environment(\.parkedAppState, appState)
+                    .interactiveDismissDisabled(true)
+            }
         }
     }
 
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(context: viewContext)
-            newItem.timestamp = Date()
-
-            do {
-                try viewContext.save()
-            } catch {
-                // Replace this implementation with code to handle the error appropriately.
-                // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
-                let nsError = error as NSError
-                fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
-            }
+    private func double(from userInfo: [AnyHashable: Any], key: String) -> Double? {
+        if let d = userInfo[key] as? Double {
+            return d
         }
+        if let n = userInfo[key] as? NSNumber {
+            return n.doubleValue
+        }
+        return nil
     }
+}
 
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            offsets.map { items[$0] }.forEach(viewContext.delete)
-
-            do {
-                try viewContext.save()
-            } catch {
-                // Replace this implementation with code to handle the error appropriately.
-                // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
-                let nsError = error as NSError
-                fatalError("Unresolved error \(nsError), \(nsError.userInfo)")
+private struct ContentViewPreviewHost: View {
+    var body: some View {
+        Group {
+            if let container = try? AppDependencies.makePreviewModelContainer() {
+                ContentView()
+                    .modelContainer(container)
+                    .onAppear {
+                        ParkedPersistence.sharedContainer = container
+                    }
+            } else {
+                Text(String(localized: "Preview unavailable", comment: "SwiftUI preview failure"))
             }
         }
     }
 }
 
-private let itemFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateStyle = .short
-    formatter.timeStyle = .medium
-    return formatter
-}()
-
-#Preview {
-    ContentView().environment(\.managedObjectContext, PersistenceController.preview.container.viewContext)
+#Preview("ContentView") {
+    ContentViewPreviewHost()
 }
