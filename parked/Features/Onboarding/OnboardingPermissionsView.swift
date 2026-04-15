@@ -63,7 +63,7 @@ struct OnboardingPermissionsView: View {
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 6)
                     } else {
-                        Text(String(localized: "Allow and get started", comment: "Onboarding permissions primary CTA"))
+                        Text(String(localized: "Continue and get started", comment: "Onboarding permissions primary CTA"))
                             .frame(maxWidth: .infinity)
                     }
                 }
