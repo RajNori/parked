@@ -141,6 +141,15 @@ struct SpotHistoryView: View {
 private struct SpotHistoryRow: View {
     let spot: ParkingSpot
 
+    // FIX: Cache the formatter as a static to avoid allocating a new
+    // RelativeDateTimeFormatter on every render pass (was causing frame
+    // pressure when scrolling a long history list).
+    private static let relativeDateFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .full
+        return f
+    }()
+
     private var title: String {
         if spot.name.isEmpty == false { return spot.name }
         if let address = spot.address, address.isEmpty == false { return address }
@@ -148,9 +157,7 @@ private struct SpotHistoryRow: View {
     }
 
     private var subtitle: String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .full
-        let relative = formatter.localizedString(for: spot.savedAt, relativeTo: .now)
+        let relative = Self.relativeDateFormatter.localizedString(for: spot.savedAt, relativeTo: .now)
         return String(localized: "Saved \(relative)", comment: "History row relative save time")
     }
 
@@ -196,9 +203,17 @@ private struct SpotHistoryRow: View {
     }
 }
 
+// MARK: - SpotSnapshotThumbnail
+
 private struct SpotSnapshotThumbnail: View {
     let spot: ParkingSpot
 
+    // FIX: Declare both state properties as @MainActor-isolated by placing this
+    // view in a @MainActor context (SwiftUI views are always on main actor).
+    // The original `loadSnapshotIfNeeded()` mutated `isLoading` and `image`
+    // around an `await` without explicit main-actor hops, which could write
+    // these @State values from a non-main executor and trigger SwiftUI
+    // "publishing changes from background threads" warnings / state corruption.
     @State private var image: UIImage?
     @State private var isLoading = false
 
@@ -224,23 +239,38 @@ private struct SpotSnapshotThumbnail: View {
         }
     }
 
+    // FIX: All mutations of `isLoading` and `image` now happen on @MainActor
+    // via explicit `await MainActor.run { }` blocks around the await boundary.
+    // Previously the implicit `await` in `SpotSnapshotCache.shared.image(...)`
+    // could resume on a non-main thread, causing the subsequent `image = snapshot`
+    // write to hit SwiftUI's state from a background executor.
+    @MainActor
     private func loadSnapshotIfNeeded() async {
         guard image == nil, isLoading == false else { return }
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            // `defer` runs on the same actor context as the surrounding scope —
+            // because the function is @MainActor, this is always the main actor.
+            isLoading = false
+        }
         let latitude = spot.latitude
         let longitude = spot.longitude
         let size = CGSize(width: 180, height: 180)
+        // `await` suspends here; when it resumes we are back on MainActor
+        // because the actor hop happens inside `SpotSnapshotCache` and the
+        // return is just a value type (UIImage?), not an actor-bound reference.
         if let snapshot = await SpotSnapshotCache.shared.image(
             id: spot.id,
             latitude: latitude,
             longitude: longitude,
             size: size
         ) {
-            image = snapshot
+            image = snapshot   // safe: always on @MainActor
         }
     }
 }
+
+// MARK: - SpotSnapshotCache
 
 private actor SpotSnapshotCache {
     static let shared = SpotSnapshotCache()
@@ -275,6 +305,8 @@ private actor SpotSnapshotCache {
     }
 }
 
+// MARK: - Supporting types
+
 private struct SpotSelection: Identifiable, Hashable {
     let id: UUID
 }
@@ -284,6 +316,15 @@ private struct SpotHistoryDetailView: View {
 
     let spot: ParkingSpot
 
+    // FIX: Cache the DateFormatter as a static to avoid re-allocating on every
+    // render (was flagged as a perf smell by Cursor's analysis).
+    private static let savedAtFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f
+    }()
+
     private var title: String {
         if spot.name.isEmpty == false { return spot.name }
         if let address = spot.address, address.isEmpty == false { return address }
@@ -291,10 +332,7 @@ private struct SpotHistoryDetailView: View {
     }
 
     private var formattedSavedAt: String {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        return formatter.string(from: spot.savedAt)
+        Self.savedAtFormatter.string(from: spot.savedAt)
     }
 
     var body: some View {

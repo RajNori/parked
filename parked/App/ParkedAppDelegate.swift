@@ -34,12 +34,24 @@ final class ParkedAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificati
     }
 
     private static func runLongParkProcessingTask(_ task: BGProcessingTask) {
+        // FIX: Use a flag to ensure `setTaskCompleted` is called exactly once.
+        // Previously, if the system fired `expirationHandler` while the async
+        // work was still in flight, both the handler AND the Task completion
+        // path would call `setTaskCompleted`, violating BGTask lifecycle rules
+        // and producing an "Invalid task completion" assertion in some builds.
+        let completionGuard = CompletionGuard()
+
         task.expirationHandler = {
-            task.setTaskCompleted(success: false)
+            completionGuard.complete {
+                task.setTaskCompleted(success: false)
+            }
         }
+
         Task { @MainActor in
             await NotificationManager.handleLongParkBackgroundCheck()
-            task.setTaskCompleted(success: true)
+            completionGuard.complete {
+                task.setTaskCompleted(success: true)
+            }
         }
     }
 
@@ -96,5 +108,22 @@ final class ParkedAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificati
                 completionHandler()
             }
         }
+    }
+}
+
+// MARK: - CompletionGuard
+
+/// Thread-safe one-shot gate: ensures a closure runs at most once regardless
+/// of which code path (expiration handler vs. async task) reaches it first.
+private final class CompletionGuard: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didComplete = false
+
+    func complete(action: () -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !didComplete else { return }
+        didComplete = true
+        action()
     }
 }

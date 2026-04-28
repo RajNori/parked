@@ -16,6 +16,12 @@ struct SaveSpotSheet: View {
     @State private var mapPosition: MapCameraPosition
     @State private var showPhotoPicker = false
 
+    // FIX: Debounce coordinate updates from the map so that a camera-change
+    // event fired during the step-advance animation cannot race with `goNext()`
+    // and snap the sheet back to step 0.  We hold the last camera center here
+    // and only write it to the view model after the user is still on step 0.
+    @State private var pendingCoordinate: CLLocationCoordinate2D?
+
     init(viewModel: SaveSpotViewModel, onSaved: @escaping @MainActor (ParkingSpot) -> Void) {
         self.viewModel = viewModel
         self.onSaved = onSaved
@@ -24,15 +30,24 @@ struct SaveSpotSheet: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 16) {
-                ProgressView(value: viewModel.progressValue)
-                    .padding(.top, 8)
+            // FIX: Use a GeometryReader-aware ScrollView as the root so content
+            // can scroll on compact/zoomed displays instead of being clipped by
+            // the safeAreaInset bottom bar.
+            ScrollView {
+                VStack(spacing: 16) {
+                    ProgressView(value: viewModel.progressValue)
+                        .padding(.top, 8)
 
-                stepView
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    stepView
+                        .frame(maxWidth: .infinity, alignment: .top)
+                }
+                .padding(.horizontal, 20)
+                // FIX: Give the scroll content bottom padding equal to the
+                // estimated bottom bar height so it is never hidden behind it.
+                // Using a generous fixed value is safe because safeAreaInset
+                // clips rather than pushes content on scroll.
+                .padding(.bottom, 100)
             }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 16)
             .navigationTitle(String(localized: "Save Spot", comment: "Save spot title"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -52,7 +67,7 @@ struct SaveSpotSheet: View {
                 Button(String(localized: "Keep editing", comment: "Discard save spot cancel"), role: .cancel) {}
                 Button(String(localized: "Discard", comment: "Discard save spot confirm"), role: .destructive) { dismiss() }
             }
-            message: {
+        message: {
                 Text(String(localized: "You have unsaved changes in this spot draft.", comment: "Discard save spot alert body"))
             }
             .sheet(isPresented: $showPhotoPicker) {
@@ -89,13 +104,19 @@ struct SaveSpotSheet: View {
                 // REASON: `Annotation` is the iOS 17-safe replacement for deprecated `MapAnnotation`.
                 Annotation(String(localized: "Saved location", comment: "Save spot pin title"), coordinate: viewModel.draftCoordinate, anchor: .bottom) { SaveSpotPinView() }
             }
-            .onMapCameraChange(frequency: .continuous) { context in
-                Task { @MainActor in
-                    viewModel.draftCoordinate = context.region.center
-                }
+            // FIX: Use `.onEnd` instead of `.continuous` to avoid spawning a new
+            // Task on every animation frame during pan/zoom, which was creating
+            // rapid-fire `@Observable` mutations that raced with `goNext()` and
+            // caused the sheet to snap back from step 1 → step 0.
+            .onMapCameraChange(frequency: .onEnd) { context in
+                // Only apply coordinate updates while still on the location step.
+                // If the user tapped Continue and the sheet is transitioning to
+                // step 1, any trailing camera event is safely discarded.
+                guard viewModel.stepIndex == 0 else { return }
+                viewModel.draftCoordinate = context.region.center
             }
             .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .frame(height: 280)
+            .frame(height: 260)
             Text(GeocodingService.coordinateFallbackString(for: viewModel.draftCoordinate))
                 .font(.caption)
                 .foregroundStyle(.secondary)

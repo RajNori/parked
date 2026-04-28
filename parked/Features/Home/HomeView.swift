@@ -19,6 +19,7 @@ enum HomeSheet: Identifiable {
 }
 
 struct HomeView: View {
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.parkedAppState) private var appState
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(AppSettings.mapStyleKey) private var mapStyleRawValue = MapStyleOption.standard.rawValue
@@ -29,6 +30,7 @@ struct HomeView: View {
     @State private var viewModel: HomeViewModel?
     @State private var pinScale: CGFloat = 1
     @State private var activeSheet: HomeSheet?
+    @State private var saveSpotViewModel: SaveSpotViewModel?
     @State private var mapCameraPosition: MapCameraPosition = .automatic
     @State private var isShowingRemoveConfirmation = false
     @State private var showReplaceAlert = false
@@ -78,24 +80,29 @@ struct HomeView: View {
                     locationDeniedOverlay(for: appState.locationManager.authorizationStatus)
                         .padding(24)
                 }
-                fab(viewModel: viewModel).padding(.trailing, 20).padding(.bottom, 28)
+                fab(appState: appState, viewModel: viewModel).padding(.trailing, 20).padding(.bottom, 28)
             }
-            .sheet(item: $activeSheet) { sheet in
+            .sheet(item: $activeSheet, onDismiss: {
+                saveSpotViewModel = nil
+            }) { sheet in
                 switch sheet {
                 case .saveSpot:
-                    SaveSpotSheet(
-                        viewModel: SaveSpotViewModel(
-                            repository: appState.repository,
-                            initialCoordinate: viewModel.currentSaveCoordinate,
-                            initialHorizontalAccuracyMeters: viewModel.currentSaveHorizontalAccuracyMeters,
-                            defaultMeterDurationMinutes: AppSettings.defaultMeterDurationMinutes()
-                        ),
-                        onSaved: { savedSpot in
-                            Task { @MainActor in
-                                viewModel.handleSavedSpot(savedSpot)
+                    if let vm = saveSpotViewModel {
+                        SaveSpotSheet(
+                            viewModel: vm,
+                            onSaved: { savedSpot in
+                                Task { @MainActor in
+                                    viewModel.handleSavedSpot(savedSpot)
+                                    saveSpotViewModel = nil
+                                }
                             }
-                        }
-                    )
+                        )
+                    } else {
+                        Color.clear
+                            .task {
+                                dismiss()
+                            }
+                    }
                 case .history:
                     NavigationStack { SpotHistoryView() }
                 case .settings:
@@ -153,6 +160,12 @@ struct HomeView: View {
                         ParkedHaptics.warningNotification()
                         viewModel.confirmReplaceAndOpenSaveFlow()
                         showReplaceAlert = false
+                        saveSpotViewModel = SaveSpotViewModel(
+                            repository: appState.repository,
+                            initialCoordinate: viewModel.currentSaveCoordinate,
+                            initialHorizontalAccuracyMeters: viewModel.currentSaveHorizontalAccuracyMeters,
+                            defaultMeterDurationMinutes: AppSettings.defaultMeterDurationMinutes()
+                        )
                         activeSheet = .saveSpot
                     }
                 }
@@ -174,7 +187,12 @@ struct HomeView: View {
                     mapCameraPosition = viewModel.cameraPosition
                 }
             }
-            .onChange(of: appState.locationManager.lastLocation?.coordinate.latitude) { _, _ in
+            // FIX: Watch the full CLLocation object (which changes whenever
+            // latitude OR longitude changes) instead of only latitude.
+            // Previously, a horizontal-only movement (constant latitude,
+            // changing longitude) would never fire this handler, leaving
+            // distance calculations and camera sync stale.
+            .onChange(of: appState.locationManager.lastLocation) { _, _ in
                 Task { @MainActor in
                     if activeSpot == nil {
                         viewModel.syncCamera(activeSpot: nil)
@@ -189,11 +207,14 @@ struct HomeView: View {
                     await refreshNotificationPermissionStatus()
                 }
             }
-            .onChange(of: viewModel.cameraPosition) { _, newValue in
-                Task { @MainActor in
-                    mapCameraPosition = newValue
-                }
-            }
+            // FIX: Remove the `.onChange(of: viewModel.cameraPosition)` handler
+            // that was mirroring cameraPosition back into mapCameraPosition.
+            // That created a feedback loop:
+            //   mapPositionBinding.set → viewModel.cameraPosition changes
+            //   → onChange fires → mapCameraPosition = newValue (redundant write
+            //     triggers another SwiftUI diff pass, sometimes mid-animation).
+            // The binding's setter already writes both sides synchronously;
+            // the separate onChange is unnecessary and harmful.
             .safeAreaInset(edge: .bottom) {
                 homeBottomCard(viewModel: viewModel)
             }
@@ -300,13 +321,19 @@ struct HomeView: View {
         .accessibilityHint(String(localized: "Double tap to see spot details", comment: "Active map annotation accessibility hint"))
     }
 
-    private func fab(viewModel: HomeViewModel) -> some View {
+    private func fab(appState: AppState, viewModel: HomeViewModel) -> some View {
         Button {
             Task { @MainActor in
                 switch viewModel.evaluateParkHereTap(activeSpot: activeSpot) {
                 case .showReplaceAlert:
                     showReplaceAlert = true
                 case .openSaveSheet:
+                    saveSpotViewModel = SaveSpotViewModel(
+                        repository: appState.repository,
+                        initialCoordinate: viewModel.currentSaveCoordinate,
+                        initialHorizontalAccuracyMeters: viewModel.currentSaveHorizontalAccuracyMeters,
+                        defaultMeterDurationMinutes: AppSettings.defaultMeterDurationMinutes()
+                    )
                     activeSheet = .saveSpot
                 }
             }
