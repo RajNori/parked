@@ -25,7 +25,9 @@ final class LocationManager: NSObject, CLLocationManagerDelegate {
         // REASON: `@Observable`/`NSObject` require all stored state before `super.init()`.
         authorizationStatus = manager.authorizationStatus
         locationServicesEnabled = true
-        lastLocation = nil
+        // Seed with Core Location's cached value when available so first map render
+        // can use a real nearby coordinate instead of `.automatic` fallback.
+        lastLocation = manager.location
         super.init()
         manager.delegate = self
         Task { @MainActor in
@@ -64,6 +66,8 @@ final class LocationManager: NSObject, CLLocationManagerDelegate {
         guard isAuthorizedForWhenInUse else { return }
         // REASON: CLLocationManager start/stop calls are expected on main thread.
         manager.desiredAccuracy = kCLLocationAccuracyBest
+        // Prompt an immediate location callback before continuous updates settle.
+        manager.requestLocation()
         manager.startUpdatingLocation()
     }
 
